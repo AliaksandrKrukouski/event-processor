@@ -1,0 +1,12 @@
+# IDE
+.idea/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Local config
+.env
