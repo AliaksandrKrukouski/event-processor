@@ -18,5 +18,5 @@ RUN useradd --create-home appuser \
 
 USER appuser
 
-# Start Kafka consumer
-CMD ["python", "-m", "app.event_processor"]
+# Start the event processor
+CMD ["python", "-m", "app.consumer"]

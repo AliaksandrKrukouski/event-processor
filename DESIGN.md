@@ -41,6 +41,26 @@ flowchart TD
 
 The sample producer is a development utility run independently of the continuously running processor. Kafka and PostgreSQL run under Docker Compose. A one-time `kafka-init` service creates the Kafka topic.
 
+### Application structure
+
+```mermaid
+flowchart TD
+    A["Kafka Topic: events"] --> B["consumer.py"]
+    subgraph EP["Event Processor Application"]
+        B --> C["processor.py"]
+        C --> D["validator.py"]
+        C --> E["store.py"]
+        E --> F[("PostgreSQL")]
+        D --> C
+        F --> E
+        E --> C
+        C -->|"Processing result"| B
+    end
+    B -->|"Commit offset after DB success"| A
+```
+
+`consumer.py` owns Kafka communication and delivery guarantees. `processor.py` holds the per-event business logic and calls `validator.py` for contract validation and `store.py` for persistence. The offset is committed only after the processor reports a durable result.
+
 ### Component responsibilities
 
 | Component | Responsibility |
