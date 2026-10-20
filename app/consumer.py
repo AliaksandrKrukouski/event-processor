@@ -4,6 +4,7 @@ Delivery is at-least-once: an offset is committed only after the processor has
 handled the message, so a crash re-delivers it instead of losing it. Business
 logic (validation, routing, persistence) lives in app.processor.
 """
+import json
 import logging
 import os
 import signal
@@ -49,8 +50,18 @@ class EventConsumer:
                         exit_code = 1
                         break
                     continue
-                    
-                self.processor.process(msg)
+
+                log.info(
+                    "received topic=%s partition=%d offset=%d key=%s",
+                    msg.topic(), msg.partition(), msg.offset(),
+                    msg.key().decode(errors="replace") if msg.key() else None,
+                )
+                try:
+                    event = json.loads(msg.value())
+                except (ValueError, TypeError):  # bad JSON, bad UTF-8, or an empty (None) value
+                    self.processor.process_invalid_json(msg.value())
+                else:
+                    self.processor.process(event)
                 # Reached only if process() returned; if it raised, nothing is committed.
                 self._consumer.commit(message=msg, asynchronous=False)
         finally:
