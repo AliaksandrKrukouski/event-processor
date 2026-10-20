@@ -14,6 +14,7 @@ import threading
 from confluent_kafka import Consumer
 
 from app.processor import EventProcessor
+from app.store import EventStore, Source
 from app.validator import EventValidator
 
 log = logging.getLogger("consumer")
@@ -56,13 +57,15 @@ class EventConsumer:
                     msg.topic(), msg.partition(), msg.offset(),
                     msg.key().decode(errors="replace") if msg.key() else None,
                 )
+                source = Source(msg.topic(), msg.partition(), msg.offset())
                 try:
                     event = json.loads(msg.value())
                 except (ValueError, TypeError):  # bad JSON, bad UTF-8, or an empty (None) value
-                    self.processor.process_invalid_json(msg.value())
+                    self.processor.process_invalid_json(msg.value(), source)
                 else:
-                    self.processor.process(event)
-                # Reached only if process() returned; if it raised, nothing is committed.
+                    self.processor.process(event, source)
+                # Reached only after the processor's database transaction committed;
+                # if it raised, nothing is committed and the message is redelivered.
                 self._consumer.commit(message=msg, asynchronous=False)
         finally:
             log.info("shutting down")
@@ -82,13 +85,17 @@ def main() -> int:
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
 
-    consumer = EventConsumer(
-        bootstrap_servers=os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:19092"),
-        group_id=os.getenv("KAFKA_GROUP_ID", "event-processor"),
-        topic=os.getenv("KAFKA_TOPIC", "events"),
-        processor=EventProcessor(validator),
-    )
-    return consumer.run(stop)
+    store = EventStore(os.getenv("POSTGRES_URL", "postgresql://events:events@postgres:5432/events"))
+    try:
+        consumer = EventConsumer(
+            bootstrap_servers=os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:19092"),
+            group_id=os.getenv("KAFKA_GROUP_ID", "event-processor"),
+            topic=os.getenv("KAFKA_TOPIC", "events"),
+            processor=EventProcessor(validator, store),
+        )
+        return consumer.run(stop)
+    finally:
+        store.close()
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ import threading
 import pytest
 
 from app.consumer import EventConsumer
+from app.store import Source
 
 
 class FakeKafkaMessage:
@@ -37,13 +38,13 @@ class FakeKafka:
 
 class RecordingProcessor:
     def __init__(self): self.events, self.invalid = [], []
-    def process(self, event): self.events.append(event)
-    def process_invalid_json(self, raw): self.invalid.append(raw)
+    def process(self, event, source): self.events.append((event, source))
+    def process_invalid_json(self, raw, source): self.invalid.append((raw, source))
 
 
 class FailingProcessor:
-    def process(self, event): raise RuntimeError("db down")
-    def process_invalid_json(self, raw): raise RuntimeError("db down")
+    def process(self, event, source): raise RuntimeError("db down")
+    def process_invalid_json(self, raw, source): raise RuntimeError("db down")
 
 
 def build(processor, value=b"{}"):
@@ -57,7 +58,7 @@ def test_offset_is_committed_after_processing():
     processor = RecordingProcessor()
     consumer, stop = build(processor)
     assert consumer.run(stop) == 0
-    assert processor.events == [{}]  # the parsed JSON is handed to the processor
+    assert processor.events == [({}, Source('events', 0, 5))]  # the parsed JSON is handed to the processor
     assert processor.invalid == []
     assert consumer._consumer.committed == [5]
     assert consumer._consumer.closed
@@ -77,7 +78,7 @@ def test_invalid_json_goes_to_process_invalid_json_and_is_committed(value):
     consumer, stop = build(processor, value)
     assert consumer.run(stop) == 0
     assert processor.events == []
-    assert processor.invalid == [value]
+    assert processor.invalid == [(value, Source('events', 0, 5))]
     assert consumer._consumer.committed == [5]
 
 

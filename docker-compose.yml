@@ -44,7 +44,10 @@ services:
     depends_on:
       kafka-init:
         condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
     environment:
+      POSTGRES_URL: postgresql://events:events@postgres:5432/events
       KAFKA_BOOTSTRAP_SERVERS: kafka:19092
       KAFKA_TOPIC: events
       KAFKA_GROUP_ID: event-processor
