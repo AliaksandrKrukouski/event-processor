@@ -4,6 +4,7 @@ import logging
 import pytest
 
 from app.processor import EventProcessor
+from app.validator import EventValidator
 
 VALID = {
     "event_id": "event_001",
@@ -35,7 +36,7 @@ def message(value):
 @pytest.fixture
 def process(caplog):
     caplog.set_level(logging.INFO)
-    return EventProcessor().process
+    return EventProcessor(EventValidator()).process
 
 
 def test_valid_event_is_ready(process, caplog):
@@ -56,7 +57,7 @@ def test_invalid_payload_is_logged_with_errors(process, caplog):
 def test_unknown_event_type(process, caplog):
     process(message(dict(VALID, event_type="order.created")))
     assert "INVALID" in caplog.text
-    assert "order.created/1.0" in caplog.text
+    assert "'order.created', '1.0'" in caplog.text
 
 
 @pytest.mark.parametrize("raw", [b"[1, 2]", b"null", b'"text"'])

@@ -10,12 +10,15 @@ import logging
 
 from confluent_kafka import Message
 
-from app.validator import validate_event
+from app.validator import EventValidator
 
 log = logging.getLogger("processor")
 
 
 class EventProcessor:
+    def __init__(self, validator: EventValidator):
+        self.validator = validator
+
     def process(self, message: Message) -> None:
         source = "topic=%s partition=%d offset=%d key=%s" % (
             message.topic(), message.partition(), message.offset(),
@@ -24,7 +27,7 @@ class EventProcessor:
 
         event = json.loads(message.value())  # assumes well-formed JSON for now
 
-        result = validate_event(event)
+        result = self.validator.validate(event)
         ids = "event_id=%s event_type=%s" % (
             event.get("event_id") if isinstance(event, dict) else None,
             event.get("event_type") if isinstance(event, dict) else None,

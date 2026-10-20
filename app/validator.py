@@ -1,8 +1,9 @@
+import json
 from dataclasses import dataclass
 from pathlib import Path
-import json
 
 from jsonschema import Draft202012Validator, FormatChecker
+
 
 SCHEMA_DIR = Path(__file__).resolve().parent.parent / "schemas"
 
@@ -13,59 +14,76 @@ class ValidationResult:
     errors: list[str]
 
 
-def load_schema(path: Path) -> dict:
-    with path.open(encoding="utf-8") as f:
-        return json.load(f)
+class EventValidator:
+    def __init__(self, schema_dir: Path = SCHEMA_DIR):
+        self.schema_dir = Path(schema_dir)
+        self.format_checker = FormatChecker()
 
-
-def validate_envelope(event: dict) -> list[str]:
-    schema = load_schema(SCHEMA_DIR / "envelope.json")
-
-    validator = Draft202012Validator(
-        schema,
-        format_checker=FormatChecker()
-    )
-
-    return [
-        error.message
-        for error in validator.iter_errors(event)
-    ]
-
-
-def validate_payload(event: dict) -> list[str]:
-    event_type = event["event_type"]
-    version = event["schema_version"]
-
-    schema_path = SCHEMA_DIR / event_type / f"{version}.json"
-
-    if not schema_path.is_file():
-        return [
-            f"Unsupported event type or schema version: "
-            f"{event_type}/{version}"
-        ]
-
-    schema = load_schema(schema_path)
-
-    validator = Draft202012Validator(schema)
-
-    return [
-        f"payload: {error.message}"
-        for error in validator.iter_errors(event["payload"])
-    ]
-
-
-def validate_event(event: dict) -> ValidationResult:
-    envelope_errors = validate_envelope(event)
-
-    if envelope_errors:
-        return ValidationResult(
-            is_valid=False,
-            errors=envelope_errors
+        # Loaded once at startup
+        self.envelope_validator = self._load_validator(
+            self.schema_dir / "envelope.json"
         )
 
-    payload_errors = validate_payload(event)
+        self.payload_validators = {}
 
-    return ValidationResult(
-        is_valid=not payload_errors,
-        errors=payload_errors
-    )
+        # Discover event-specific schemas: <event_type>/<schema_version>.json
+        for path in sorted(self.schema_dir.glob("*/*.json")):
+            event_type = path.parent.name
+            version = path.stem
+
+            key = (event_type, version)
+
+            self.payload_validators[key] = (
+                self._load_validator(path)
+            )
+
+        if not self.payload_validators:
+            raise RuntimeError("No payload schemas found")
+
+    def _load_validator(self, path: Path):
+        with path.open(encoding="utf-8") as file:
+            schema = json.load(file)
+
+        # Check that the schema itself is valid
+        Draft202012Validator.check_schema(schema)
+
+        # Create reusable validator
+        return Draft202012Validator(
+            schema,
+            format_checker=self.format_checker
+        )
+
+    def validate(self, event: dict) -> ValidationResult:
+        # 1. Validate envelope
+        errors = [
+            error.message
+            for error in self.envelope_validator.iter_errors(event)
+        ]
+
+        if errors:
+            return ValidationResult(False, errors)
+
+        # 2. Find payload schema
+        key = (
+            event["event_type"],
+            event["schema_version"]
+        )
+
+        validator = self.payload_validators.get(key)
+
+        if validator is None:
+            return ValidationResult(
+                False,
+                [f"Unsupported event type/version: {key}"]
+            )
+
+        # 3. Validate payload
+        errors = [
+            f"payload: {error.message}"
+            for error in validator.iter_errors(event["payload"])
+        ]
+
+        return ValidationResult(
+            is_valid=len(errors) == 0,
+            errors=errors
+        )

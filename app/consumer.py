@@ -13,6 +13,7 @@ import threading
 from confluent_kafka import Consumer
 
 from app.processor import EventProcessor
+from app.validator import EventValidator
 
 log = logging.getLogger("consumer")
 
@@ -64,6 +65,8 @@ def main() -> int:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
 
+    validator = EventValidator()  # loads and checks all schemas; fails fast if any is bad
+
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
@@ -72,7 +75,7 @@ def main() -> int:
         bootstrap_servers=os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:19092"),
         group_id=os.getenv("KAFKA_GROUP_ID", "event-processor"),
         topic=os.getenv("KAFKA_TOPIC", "events"),
-        processor=EventProcessor(),
+        processor=EventProcessor(validator),
     )
     return consumer.run(stop)
 

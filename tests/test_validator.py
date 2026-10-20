@@ -1,8 +1,11 @@
 import copy
 
 import pytest
+from jsonschema.exceptions import SchemaError
 
-from app.validator import validate_event
+from app.validator import EventValidator
+
+validate_event = EventValidator().validate
 
 PAYMENT = {
     "event_id": "event_001",
@@ -75,13 +78,13 @@ def test_envelope_reports_all_errors():
 def test_unknown_event_type():
     result = validate_event(changed(PAYMENT, event_type="order.created"))
     assert not result.is_valid
-    assert "order.created/1.0" in result.errors[0]
+    assert "'order.created', '1.0'" in result.errors[0]
 
 
 def test_unknown_schema_version():
     result = validate_event(changed(PAYMENT, schema_version="9.9"))
     assert not result.is_valid
-    assert "payment.authorized/9.9" in result.errors[0]
+    assert "'payment.authorized', '9.9'" in result.errors[0]
 
 
 @pytest.mark.parametrize(
@@ -117,3 +120,23 @@ def test_extra_payload_fields_are_accepted():
     event = copy.deepcopy(PAYMENT)
     event["payload"]["note"] = "extra"
     assert validate_event(event).is_valid
+
+
+def test_loads_all_payload_schemas():
+    assert {"payment.authorized", "monitoring.alert"} <= {t for t, _ in EventValidator().payload_validators}
+
+
+def test_invalid_schema_fails_at_startup(tmp_path):
+    (tmp_path / "envelope.json").write_text('{"type": "object"}')
+    (tmp_path / "bad.type").mkdir()
+    (tmp_path / "bad.type" / "1.0.json").write_text('{"type": "not-a-type"}')
+
+    with pytest.raises(SchemaError):
+        EventValidator(tmp_path)
+
+
+def test_no_payload_schemas_fails_at_startup(tmp_path):
+    (tmp_path / "envelope.json").write_text('{"type": "object"}')
+
+    with pytest.raises(RuntimeError):
+        EventValidator(tmp_path)
