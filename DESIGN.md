@@ -97,7 +97,7 @@ The initial implementation processes messages sequentially per consumer to simpl
 | Malformed JSON | `INVALID`, preserve raw message | Commit after DB commit |
 | Duplicate event | No second logical event row | Commit after deduplication is confirmed |
 | Temporary PostgreSQL failure | No acknowledged result | Do not commit; retry/replay |
-| Unexpected persistent processing failure | Record `FAILED` if possible, otherwise retain message for retry | Commit only after durable disposition |
+| Unexpected persistent processing failure (poison message) | Copied to `events.dlq` | Commit only after the broker confirms the DLQ copy |
 
 ### Event statuses
 
@@ -105,13 +105,11 @@ The initial implementation processes messages sequentially per consumer to simpl
 | --- | --- | --- |
 | `READY` | Processor | Passed validation, ready for downstream delivery. |
 | `INVALID` | Processor | Failed envelope or payload validation. Stored with the errors. |
-| `FAILED` | Processor | A terminal processing error that was successfully recorded. |
 | `DELIVERED` | Delivery service | Delivered to the client. Never written by the processor. |
 
 ```text
 Kafka ─► Processor ─┬─► READY ─► DELIVERED (delivery service)
-                    ├─► INVALID
-                    └─► FAILED
+                    └─► INVALID
 ```
 
 ### Event contracts and schema versioning
@@ -168,7 +166,7 @@ A single PostgreSQL `events` table holds valid and invalid events (see `db/init.
 | `occurred_at` | `TIMESTAMPTZ` nullable | When the event happened at the producer |
 | `payload` | `JSONB` nullable | Parsed payload; NULL if unparseable |
 | `raw_message` | `BYTEA` nullable | Original bytes for diagnostics |
-| `status` | `TEXT NOT NULL` | `READY`, `INVALID`, `FAILED`, or `DELIVERED` (CHECK constraint) |
+| `status` | `TEXT NOT NULL` | `READY`, `INVALID`, or `DELIVERED` (CHECK constraint) |
 | `validation_errors` | `JSONB` nullable | Structured validation failures |
 | `routing_targets` | `JSONB` nullable | Selected destination or routing decision |
 | `received_at` | `TIMESTAMPTZ NOT NULL` | When the consumer received the message |
@@ -256,7 +254,7 @@ Database connection failures or temporary infrastructure problems trigger bounde
 
 ### Poison messages
 
-Malformed or schema-invalid events are expected business-validation outcomes and are persisted as `INVALID`, not endlessly retried. Unexpected processing failures follow a bounded retry policy. If they still fail, the failure is recorded as a `FAILED` row with the raw message and the reason, and the offset is then committed so the partition is not blocked. A separate Kafka DLQ is not part of the initial design because PostgreSQL already records these events; adding a DLQ is an optional extension.
+Malformed or schema-invalid events are expected business-validation outcomes and are persisted as `INVALID`, not endlessly retried. Transient database errors are retried with exponential backoff; if the database stays unavailable the consumer stops without committing and the message is redelivered. A poison message (an unexpected, non-transient processing error) is copied to the `events.dlq` Kafka topic with `error` and `source-*` headers, and only after the broker confirms the copy is its offset committed, so one bad message cannot block the partition. If the DLQ publish fails, nothing is committed.
 
 ### Graceful shutdown
 
@@ -278,7 +276,7 @@ The local Compose environment uses one Kafka broker and one PostgreSQL instance.
 | Crash after persist, before commit | Redelivered, deduplicated by `event_id`. |
 | Crash before persist | Offset not committed, event re-read and stored. |
 | PostgreSQL temporarily down | Retry with backoff. Offset not committed. Events wait in Kafka. |
-| Persistent error on one message | After retries, recorded as `FAILED`, offset committed, partition continues. |
+| Persistent error on one message | Copied to `events.dlq`, offset committed, partition continues. |
 | Kafka broker down | Client reconnects; nothing is processed until it returns. |
 | Consumer group rebalance | Offsets are committed per message after persist, so a new owner resumes after the last stored event. |
 | Broken schema file | Startup fails fast, so the service never runs with partial contracts. |
@@ -289,7 +287,7 @@ The local Compose environment uses one Kafka broker and one PostgreSQL instance.
 - Static, repository-managed schemas and routing rules. Schema versioning is by exact match, with no compatibility checking between versions.
 - No actual downstream delivery or delivery-attempt tracking; `DELIVERED` exists in the schema but nothing sets it here.
 - No tenant authentication, authorization, or PostgreSQL row-level security.
-- No dedicated DLQ/replay administration workflow in the initial scope; `FAILED` rows can be inspected but re-driving them is manual.
+- No dedicated DLQ/replay administration workflow in the initial scope; messages in `events.dlq` can be inspected but re-driving them is manual.
 - No throughput benchmark or production capacity plan yet. Per-message offset commits are simple and safe but limit throughput; batching commits is a future optimisation.
 - Unbounded table growth: no retention, archival, or partitioning. Time-partitioning would force the primary key to include the partition column and weaken `event_id` deduplication, which is a real trade-off.
 - No ordering guarantee across tenants, and `id` order only approximates commit order with several processors. Keying by `tenant_id` can overload one partition for a very large tenant.

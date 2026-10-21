@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS events (
     raw_message       BYTEA,          -- original bytes, kept for unparseable/invalid messages
 
     -- processing result
-    status            TEXT        NOT NULL CHECK (status IN ('READY', 'INVALID', 'FAILED', 'DELIVERED')),
+    status            TEXT        NOT NULL CHECK (status IN ('READY', 'INVALID', 'DELIVERED')),
     validation_errors JSONB,          -- list of errors when status = 'INVALID'
     routing_targets   JSONB,          -- routing decision, e.g. ["webhook:client-a"]
 

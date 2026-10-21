@@ -36,7 +36,11 @@ services:
       kafka:
         condition: service_healthy
     restart: "no"
-    command: /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists --topic events --partitions 3 --replication-factor 1
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists --topic events --partitions 3 --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists --topic events.dlq --partitions 1 --replication-factor 1
 
   event-processor:
     build: .
@@ -50,6 +54,7 @@ services:
       POSTGRES_URL: postgresql://events:events@postgres:5432/events
       KAFKA_BOOTSTRAP_SERVERS: kafka:19092
       KAFKA_TOPIC: events
+      KAFKA_DLQ_TOPIC: events.dlq
       KAFKA_GROUP_ID: event-processor
     restart: unless-stopped
     stop_grace_period: 30s

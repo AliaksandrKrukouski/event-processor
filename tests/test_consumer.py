@@ -2,7 +2,7 @@ import logging
 import pytest
 
 from app.consumer import EventConsumer
-from app.store import Source
+from app.store import Source, StoreUnavailable
 
 
 class FakeKafkaMessage:
@@ -41,13 +41,32 @@ class RecordingProcessor:
 
 
 class FailingProcessor:
-    def process(self, event, source): raise RuntimeError("db down")
-    def process_invalid_json(self, raw, source): raise RuntimeError("db down")
+    """Raises `error` for every message."""
+
+    def __init__(self, error): self.error = error
+    def process(self, event, source): raise self.error
+    def process_invalid_json(self, raw, source): raise self.error
+
+
+class FakeProducer:
+    """Stands in for confluent_kafka.Producer; `fail` makes the broker reject the message."""
+
+    def __init__(self, fail=False):
+        self.fail, self.sent = fail, []
+
+    def produce(self, topic, value, key, headers, on_delivery):
+        self.sent.append({"topic": topic, "value": value, "key": key, "headers": dict(headers)})
+        self._on_delivery = on_delivery
+
+    def flush(self, timeout):
+        self._on_delivery("broker said no" if self.fail else None, None)
+        return 0
 
 
 def build(processor, value=b"{}"):
     consumer = EventConsumer("unused:9092", "g", "events", processor)
     consumer._consumer = FakeKafka(consumer.stop, value)  # delivers one message, then stops
+    consumer._producer = FakeProducer()
     return consumer
 
 
@@ -61,12 +80,32 @@ def test_offset_is_committed_after_processing():
     assert consumer._consumer.closed
 
 
-def test_offset_is_not_committed_when_processing_fails():
-    consumer = build(FailingProcessor())
-    with pytest.raises(RuntimeError):
+def test_offset_is_not_committed_when_the_store_is_unavailable():
+    consumer = build(FailingProcessor(StoreUnavailable("db down")))
+    with pytest.raises(StoreUnavailable):
         consumer.run()
     assert consumer._consumer.committed == []
+    assert consumer._producer.sent == []  # not the message's fault: it must not be dead-lettered
     assert consumer._consumer.closed  # still leaves the group cleanly
+
+
+def test_poison_message_goes_to_dlq_and_offset_is_committed():
+    consumer = build(FailingProcessor(ValueError("cannot be stored")), value=b'{"a": 1}')
+    assert consumer.run() == 0
+    [sent] = consumer._producer.sent
+    assert sent["topic"] == "events.dlq"
+    assert (sent["value"], sent["key"]) == (b'{"a": 1}', b"tenant-001")
+    assert sent["headers"]["error"] == b"ValueError: cannot be stored"
+    assert (sent["headers"]["source-partition"], sent["headers"]["source-offset"]) == (b"0", b"5")
+    assert consumer._consumer.committed == [5]
+
+
+def test_offset_is_not_committed_when_the_dlq_publish_fails():
+    consumer = build(FailingProcessor(ValueError("bad")))
+    consumer._producer = FakeProducer(fail=True)
+    with pytest.raises(RuntimeError, match="could not publish"):
+        consumer.run()
+    assert consumer._consumer.committed == []
 
 
 @pytest.mark.parametrize("value", [b"{not json", b"", b"\xff\xfe", None])

@@ -8,8 +8,8 @@ Transient database errors (connection lost, server restarting, deadlock, ...) ar
 with exponential backoff on a fresh connection. If the connection drops after a commit but
 before the reply arrives, the retry hits the unique constraint and is reported as a
 duplicate, which is harmless. Errors that retrying cannot fix (bad data, constraint or
-syntax errors) are raised immediately. When retries run out, the error is raised, nothing
-is acknowledged to Kafka, and the message is redelivered.
+syntax errors) are raised immediately. When retries run out, StoreUnavailable is raised,
+nothing is acknowledged to Kafka, and the message is redelivered.
 """
 import logging
 import time
@@ -36,6 +36,13 @@ INSERT INTO events (
 )
 ON CONFLICT (event_id) DO NOTHING
 """
+
+
+class StoreUnavailable(Exception):
+    """The database could not be reached or written to, even after retrying.
+
+    The message itself may be fine, so it must be redelivered, not dead-lettered.
+    """
 
 
 class Source(NamedTuple):
@@ -120,7 +127,7 @@ class EventStore:
                 self._drop_connection()  # the next attempt starts from a fresh connection
                 if attempt == self._max_attempts:
                     log.error("insert failed after %d attempts: %s", attempt, e)
-                    raise
+                    raise StoreUnavailable(str(e)) from e
                 delay = min(self._max_delay, self._base_delay * 2 ** (attempt - 1))
                 log.warning("insert failed (attempt %d/%d), retrying in %.1fs: %s",
                             attempt, self._max_attempts, delay, e)

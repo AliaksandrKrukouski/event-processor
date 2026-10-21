@@ -5,7 +5,7 @@ import psycopg
 import pytest
 
 from app import store as store_module
-from app.store import EventStore, Source
+from app.store import EventStore, Source, StoreUnavailable
 
 EVENT = {
     "event_id": "event_001", "event_type": "payment.authorized", "tenant_id": "t",
@@ -91,7 +91,7 @@ def test_retry_after_commit_is_reported_as_duplicate(db):
 def test_gives_up_after_max_attempts(db):
     store = make(max_attempts=3)
     db.executes[:] = [down(), down(), down()]
-    with pytest.raises(psycopg.OperationalError):
+    with pytest.raises(StoreUnavailable):
         store.save_ready(EVENT, SOURCE)
 
 

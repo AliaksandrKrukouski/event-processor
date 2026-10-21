@@ -21,11 +21,12 @@ SCENARIOS = [
     "missing-fields",
     "malformed-json",
     "duplicates",
+    "poison",
     "mixed",
 ]
 TENANTS = ["tenant-001", "tenant-002", "tenant-003"]
-# Scenarios cycled through by "mixed" (duplicates are covered by their own scenario).
-MIXED = [s for s in SCENARIOS if s not in ("mixed", "duplicates")]
+# Scenarios cycled through by "mixed" (duplicates and poison have their own scenarios).
+MIXED = [s for s in SCENARIOS if s not in ("mixed", "duplicates", "poison")]
 
 
 def payment_payload(rng: random.Random, n: int) -> dict:
@@ -72,6 +73,11 @@ def build(kind: str, rng: random.Random, n: int):
         event["schema_version"] = "9.9"
     elif kind == "missing-fields":
         del event["tenant_id"]
+    elif kind == "poison":
+        # Valid against the schema, but a NUL character cannot be stored in PostgreSQL JSONB,
+        # so persisting fails every time and the message ends up in the dead-letter topic.
+        field = "transaction_id" if event["event_type"] == "payment.authorized" else "message"
+        event["payload"][field] += "\u0000"
     elif kind == "malformed-json":
         return None, b'{"event_id": "event_%03d", "event_type": ' % n
 
