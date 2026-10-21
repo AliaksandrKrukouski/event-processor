@@ -9,7 +9,6 @@ import logging
 import os
 import signal
 import sys
-import threading
 
 from confluent_kafka import Consumer
 
@@ -24,6 +23,7 @@ class EventConsumer:
     def __init__(self, bootstrap_servers: str, group_id: str, topic: str, processor: EventProcessor):
         self.topic = topic
         self.processor = processor
+        self.running = True
         self._consumer = Consumer({
             "bootstrap.servers": bootstrap_servers,
             "group.id": group_id,
@@ -31,8 +31,17 @@ class EventConsumer:
             "enable.auto.commit": False,  # commit manually, after the message is processed
         })
 
-    def run(self, stop: threading.Event) -> int:
-        """Consume until `stop` is set. Returns a process exit code."""
+    def stop(self) -> None:
+        """Ask run() to finish the message in flight and return. Safe to call from a signal handler."""
+        self.running = False
+
+    def run(self) -> int:
+        """Consume until stop() is called, or SIGTERM/SIGINT arrives. Returns a process exit code.
+
+        Must be called from the main thread, the only one that can install signal handlers.
+        """
+        signal.signal(signal.SIGTERM, lambda *_: self.stop())
+        signal.signal(signal.SIGINT, lambda *_: self.stop())
         self._consumer.subscribe(
             [self.topic],
             on_assign=lambda _, parts: log.info("assigned partitions: %s", [p.partition for p in parts]),
@@ -41,7 +50,7 @@ class EventConsumer:
 
         exit_code = 0
         try:
-            while not stop.is_set():
+            while self.running:
                 msg = self._consumer.poll(1.0)
                 if msg is None:
                     continue
@@ -81,10 +90,6 @@ def main() -> int:
 
     validator = EventValidator()  # loads and checks all schemas; fails fast if any is bad
 
-    stop = threading.Event()
-    signal.signal(signal.SIGTERM, lambda *_: stop.set())
-    signal.signal(signal.SIGINT, lambda *_: stop.set())
-
     store = EventStore(os.getenv("POSTGRES_URL", "postgresql://events:events@postgres:5432/events"))
     try:
         consumer = EventConsumer(
@@ -93,7 +98,7 @@ def main() -> int:
             topic=os.getenv("KAFKA_TOPIC", "events"),
             processor=EventProcessor(validator, store),
         )
-        return consumer.run(stop)
+        return consumer.run()
     finally:
         store.close()
 

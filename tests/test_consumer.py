@@ -1,6 +1,4 @@
 import logging
-import threading
-
 import pytest
 
 from app.consumer import EventConsumer
@@ -18,7 +16,7 @@ class FakeKafkaMessage:
 
 
 class FakeKafka:
-    """Stands in for confluent_kafka.Consumer: delivers one message, then asks to stop."""
+    """Stands in for confluent_kafka.Consumer: delivers one message, then asks the consumer to stop."""
 
     def __init__(self, stop, value=b"{}"):
         self.value = value
@@ -27,7 +25,7 @@ class FakeKafka:
     def subscribe(self, *args, **kwargs): pass
 
     def poll(self, timeout):
-        self.stop.set()
+        self.stop()
         return FakeKafkaMessage(self.value)
 
     def commit(self, message, asynchronous):
@@ -48,16 +46,15 @@ class FailingProcessor:
 
 
 def build(processor, value=b"{}"):
-    stop = threading.Event()
     consumer = EventConsumer("unused:9092", "g", "events", processor)
-    consumer._consumer = FakeKafka(stop, value)  # no broker needed
-    return consumer, stop
+    consumer._consumer = FakeKafka(consumer.stop, value)  # delivers one message, then stops
+    return consumer
 
 
 def test_offset_is_committed_after_processing():
     processor = RecordingProcessor()
-    consumer, stop = build(processor)
-    assert consumer.run(stop) == 0
+    consumer = build(processor)
+    assert consumer.run() == 0
     assert processor.events == [({}, Source('events', 0, 5))]  # the parsed JSON is handed to the processor
     assert processor.invalid == []
     assert consumer._consumer.committed == [5]
@@ -65,9 +62,9 @@ def test_offset_is_committed_after_processing():
 
 
 def test_offset_is_not_committed_when_processing_fails():
-    consumer, stop = build(FailingProcessor())
+    consumer = build(FailingProcessor())
     with pytest.raises(RuntimeError):
-        consumer.run(stop)
+        consumer.run()
     assert consumer._consumer.committed == []
     assert consumer._consumer.closed  # still leaves the group cleanly
 
@@ -75,8 +72,8 @@ def test_offset_is_not_committed_when_processing_fails():
 @pytest.mark.parametrize("value", [b"{not json", b"", b"\xff\xfe", None])
 def test_invalid_json_goes_to_process_invalid_json_and_is_committed(value):
     processor = RecordingProcessor()
-    consumer, stop = build(processor, value)
-    assert consumer.run(stop) == 0
+    consumer = build(processor, value)
+    assert consumer.run() == 0
     assert processor.events == []
     assert processor.invalid == [(value, Source('events', 0, 5))]
     assert consumer._consumer.committed == [5]
@@ -84,6 +81,21 @@ def test_invalid_json_goes_to_process_invalid_json_and_is_committed(value):
 
 def test_kafka_message_details_are_logged_by_the_consumer(caplog):
     caplog.set_level(logging.INFO)
-    consumer, stop = build(RecordingProcessor())
-    consumer.run(stop)
+    consumer = build(RecordingProcessor())
+    consumer.run()
     assert "received topic=events partition=0 offset=5 key=tenant-001" in caplog.text
+
+
+def test_sigterm_stops_the_consumer():
+    import os
+    import signal
+
+    class SignalingKafka(FakeKafka):
+        def poll(self, timeout):
+            os.kill(os.getpid(), signal.SIGTERM)  # what `docker stop` does
+            return None
+
+    consumer = build(RecordingProcessor())
+    consumer._consumer = SignalingKafka(consumer.stop)
+    assert consumer.run() == 0
+    assert consumer._consumer.closed
