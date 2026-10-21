@@ -1,15 +1,9 @@
-"""PostgreSQL persistence for processed events.
+"""Writes events to PostgreSQL.
 
-Every write is a single INSERT in its own transaction, with ON CONFLICT (event_id) DO
-NOTHING, so replaying a message (after a crash, rebalance or producer retry) is harmless.
-A method returns only after the transaction has committed; it raises if the write failed.
-
-Transient database errors (connection lost, server restarting, deadlock, ...) are retried
-with exponential backoff on a fresh connection. If the connection drops after a commit but
-before the reply arrives, the retry hits the unique constraint and is reported as a
-duplicate, which is harmless. Errors that retrying cannot fix (bad data, constraint or
-syntax errors) are raised immediately. When retries run out, StoreUnavailable is raised,
-nothing is acknowledged to Kafka, and the message is redelivered.
+Each save is one INSERT ... ON CONFLICT (event_id) DO NOTHING in its own transaction, so
+saving the same event twice is harmless. Connection-level errors are retried with
+exponential backoff; if they persist, StoreUnavailable is raised. Other errors (bad data
+and so on) are raised straight away.
 """
 import logging
 import time
@@ -20,8 +14,7 @@ from psycopg.types.json import Jsonb
 
 log = logging.getLogger("store")
 
-# OperationalError covers connection failures, admin shutdown, serialization failures and
-# deadlocks; InterfaceError is raised when using a connection that has already been closed.
+# connection failures, server shutdown, deadlocks; InterfaceError means the connection is closed
 TRANSIENT_ERRORS = (psycopg.OperationalError, psycopg.InterfaceError)
 
 INSERT_SQL = """
@@ -39,10 +32,7 @@ ON CONFLICT (event_id) DO NOTHING
 
 
 class StoreUnavailable(Exception):
-    """The database could not be reached or written to, even after retrying.
-
-    The message itself may be fine, so it must be redelivered, not dead-lettered.
-    """
+    """The database is still failing after all retries. The message itself may be fine."""
 
 
 class Source(NamedTuple):
@@ -53,7 +43,7 @@ class Source(NamedTuple):
 
 
 def _text(value: Any) -> Optional[str]:
-    """A non-empty string, else None: keeps wrongly typed values out of TEXT columns."""
+    """The value if it is a non-empty string, otherwise None."""
     return value if isinstance(value, str) and value else None
 
 
@@ -65,36 +55,32 @@ class EventStore:
         base_delay: float = 0.5,
         max_delay: float = 30.0,
     ):
-        """With the defaults the waits between attempts are 0.5, 1, 2, 4 and 8 seconds.
-
-        That total (about 15s) stays below the 30s container stop grace period, so a SIGTERM
-        received while retrying still ends in a clean exit.
-        """
+        # Defaults wait 0.5, 1, 2, 4 and 8 seconds (about 15s), less than the 30s stop grace period.
         self._url = url
         self._max_attempts = max_attempts
         self._base_delay = base_delay
         self._max_delay = max_delay
-        self._conn: Optional[psycopg.Connection] = None  # opened on first use, reopened after errors
+        self._conn: Optional[psycopg.Connection] = None  # opened on first use
 
     def save_ready(self, event: dict, source: Source, routing_targets: List[str]) -> bool:
-        """Store a valid, routed event. Returns False if an event with this event_id already exists."""
+        """Store a valid event. Returns False if the event_id is already stored."""
         return self._insert(
             status="READY",
             event_id=event["event_id"],
             tenant_id=event["tenant_id"],
             event_type=event["event_type"],
             schema_version=event["schema_version"],
-            occurred_at=event["occurred_at"],  # validated as RFC 3339; Postgres parses it
+            occurred_at=event["occurred_at"],  # already checked as a date-time
             payload=Jsonb(event["payload"]),
             routing_targets=Jsonb(routing_targets),
             source=source,
         )
 
     def save_invalid(self, errors: List[str], source: Source, raw: Optional[bytes], event: Any = None) -> bool:
-        """Store an event that failed validation (`event` is None if it was not parseable JSON).
+        """Store an event that failed validation; `event` is None if it was not JSON.
 
-        Envelope columns are filled best-effort; the original bytes are always kept.
-        Without a usable event_id the key falls back to the Kafka position.
+        Envelope columns are filled in where the values look usable. Without a usable
+        event_id the key is built from the Kafka position.
         """
         fields = event if isinstance(event, dict) else {}
         return self._insert(
@@ -119,13 +105,12 @@ class EventStore:
         for attempt in range(1, self._max_attempts + 1):
             try:
                 if self._conn is None:
-                    # autocommit: each `with transaction()` below is then a real BEGIN/COMMIT
                     self._conn = psycopg.connect(self._url, autocommit=True, connect_timeout=10)
                 with self._conn.transaction():
                     inserted = self._conn.execute(INSERT_SQL, row).rowcount == 1
                 break
             except TRANSIENT_ERRORS as e:
-                self._drop_connection()  # the next attempt starts from a fresh connection
+                self._drop_connection()  # reconnect on the next attempt
                 if attempt == self._max_attempts:
                     log.error("insert failed after %d attempts: %s", attempt, e)
                     raise StoreUnavailable(str(e)) from e

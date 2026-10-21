@@ -1,13 +1,7 @@
-"""Entry point. Owns Kafka communication and message delivery guarantees.
+"""Kafka entry point: reads messages, passes them to the processor, commits offsets afterwards.
 
-Delivery is at-least-once: an offset is committed only after the processor has
-handled the message, so a crash re-delivers it instead of losing it. Business
-logic (validation, routing, persistence) lives in app.processor.
-
-A poison message (one the processor cannot handle no matter how often it is retried) is
-copied to a dead-letter topic, and only then is its offset committed, so it cannot block
-the partition. Failures that are not the message's fault (database unavailable) are not
-dead-lettered: the consumer stops and the message is redelivered.
+Messages the processor cannot handle go to the dead-letter topic before their offset is
+committed. If the database is down the consumer stops instead, and Kafka redelivers.
 """
 import json
 import logging
@@ -37,19 +31,16 @@ class EventConsumer:
             "bootstrap.servers": bootstrap_servers,
             "group.id": group_id,
             "auto.offset.reset": "earliest",
-            "enable.auto.commit": False,  # commit manually, after the message is processed
+            "enable.auto.commit": False,  # we commit after processing
         })
         self._producer = Producer({"bootstrap.servers": bootstrap_servers, "acks": "all"})
 
     def stop(self) -> None:
-        """Ask run() to finish the message in flight and return. Safe to call from a signal handler."""
+        """Finish the current message and leave run(). Safe to call from a signal handler."""
         self.running = False
 
     def run(self) -> int:
-        """Consume until stop() is called, or SIGTERM/SIGINT arrives. Returns a process exit code.
-
-        Must be called from the main thread, the only one that can install signal handlers.
-        """
+        """Consume until stop() or SIGTERM/SIGINT. Returns the exit code. Main thread only."""
         signal.signal(signal.SIGTERM, lambda *_: self.stop())
         signal.signal(signal.SIGINT, lambda *_: self.stop())
         self._consumer.subscribe(
@@ -80,26 +71,24 @@ class EventConsumer:
                 try:
                     try:
                         event = json.loads(msg.value())
-                    except (ValueError, TypeError):  # bad JSON, bad UTF-8, or an empty (None) value
+                    except (ValueError, TypeError):  # bad JSON, bad UTF-8 or no value at all
                         self.processor.process_invalid_json(msg.value(), source)
                     else:
                         self.processor.process(event, source)
                 except StoreUnavailable:
-                    raise  # not the message's fault: nothing is committed, it is redelivered
-                except Exception as error:  # poison message: park it and keep the partition moving
+                    raise  # the database is the problem, not the message: leave it uncommitted
+                except Exception as error:  # poison message
                     log.exception("processing failed, sending to %s", self.dlq_topic)
                     self._dead_letter(msg, error)
-                # Reached only after the message was stored (or dead-lettered); if anything
-                # above raised, nothing is committed and the message is redelivered.
+                # only reached once the message is stored or dead-lettered
                 self._consumer.commit(message=msg, asynchronous=False)
         finally:
             log.info("shutting down")
-            self._consumer.close()  # leaves the group so partitions are reassigned promptly
+            self._consumer.close()  # leave the group so partitions move to another consumer
         return exit_code
 
-
     def _dead_letter(self, msg: Message, error: Exception) -> None:
-        """Copy the original message to the DLQ topic and wait until the broker confirms it."""
+        """Copy the message to the DLQ topic and wait for the broker to confirm it."""
         results = []
         self._producer.produce(
             self.dlq_topic,
@@ -125,7 +114,7 @@ def main() -> int:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
 
-    validator = EventValidator()  # loads and checks all schemas; fails fast if any is bad
+    validator = EventValidator()  # loads and checks all schemas
 
     store = EventStore(os.getenv("POSTGRES_URL", "postgresql://events:events@postgres:5432/events"))
     try:

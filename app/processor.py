@@ -1,10 +1,7 @@
-"""Business logic for a single event: validate, route and persist.
+"""Handles one event: validate, route, store.
 
-Knows nothing about Kafka: the consumer hands over the parsed event (or the raw bytes
-of an unparseable one) with its position, and logs message details itself. Contract with the caller:
-  - returning normally means the event reached a final disposition and may be acknowledged;
-  - raising means it did not, and the event must be delivered again.
-Bad events are an expected outcome, not an error: they are recorded, never raised.
+Returning means the event is stored and its offset can be committed. Raising means it
+is not. Invalid events are stored as INVALID, they do not raise.
 """
 import json
 import logging
@@ -15,8 +12,7 @@ from app.validator import EventValidator
 
 log = logging.getLogger("processor")
 
-# Routing table: tenant_id -> delivery target. Local and explicit; the processor only records
-# the decision, a separate service does the delivery.
+# tenant_id -> delivery target. We only record the choice; another service delivers.
 TENANT_ROUTES = {
     "tenant-001": "destination-A",
     "tenant-002": "destination-B",
@@ -30,13 +26,13 @@ class EventProcessor:
         self.store = store
 
     def process(self, event: Any, source: Source) -> None:
-        """Validate and route a parsed event, then persist it as READY or INVALID."""
+        """Store the event as READY, or as INVALID if validation or routing fails."""
         result = self.validator.validate(event)
         errors = list(result.errors)
         targets = None
         if result.is_valid:
             target = TENANT_ROUTES.get(event["tenant_id"])
-            if target is None:  # a valid event for a tenant we have no route for is not deliverable
+            if target is None:
                 errors.append("routing: no route for tenant_id %r" % event["tenant_id"])
             else:
                 targets = [target]
@@ -48,12 +44,12 @@ class EventProcessor:
             self.store.save_ready(event, source, targets)
             log.info("READY %s targets=%s", ids, targets)
         else:
-            raw = json.dumps(event).encode()  # the original bytes are not passed down; keep the parsed form
+            raw = json.dumps(event).encode()  # the original bytes are not available here
             self.store.save_invalid(errors, source, raw, event)
             log.warning("INVALID %s errors=%s", ids, errors)
 
     def process_invalid_json(self, raw: Optional[bytes], source: Source) -> None:
-        """Persist a message value that is not valid JSON; the raw bytes are all we have."""
+        """Store a message whose value is not valid JSON."""
         errors = ["value is not valid JSON"]
         self.store.save_invalid(errors, source, raw)
         log.warning("INVALID errors=%s raw=%r", errors, (raw or b"")[:200])
