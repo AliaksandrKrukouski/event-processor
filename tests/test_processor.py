@@ -22,8 +22,8 @@ class FakeStore:
     def __init__(self):
         self.ready, self.invalid = [], []
 
-    def save_ready(self, event, source):
-        self.ready.append((event, source))
+    def save_ready(self, event, source, routing_targets):
+        self.ready.append((event, source, routing_targets))
 
     def save_invalid(self, errors, source, raw, event=None):
         self.invalid.append({"errors": errors, "source": source, "raw": raw, "event": event})
@@ -42,7 +42,7 @@ def processor(store, caplog):
 
 def test_valid_event_is_stored_as_ready(processor, store, caplog):
     processor.process(VALID, SOURCE)
-    assert store.ready == [(VALID, SOURCE)]
+    assert store.ready == [(VALID, SOURCE, ["destination-A"])]
     assert store.invalid == []
     assert "READY event_id=event_001 event_type=payment.authorized" in caplog.text
 
@@ -57,6 +57,13 @@ def test_invalid_payload_is_stored_with_errors(processor, store, caplog):
     assert row["event"] == event and row["source"] == SOURCE
     assert b"event_001" in row["raw"]
     assert "INVALID" in caplog.text
+
+
+def test_unknown_tenant_is_stored_as_invalid_with_a_routing_error(processor, store):
+    event = dict(VALID, tenant_id="tenant-999")
+    processor.process(event, SOURCE)
+    assert store.ready == []
+    assert store.invalid[0]["errors"] == ["routing: no route for tenant_id 'tenant-999'"]
 
 
 def test_unknown_event_type_is_stored_as_invalid(processor, store):

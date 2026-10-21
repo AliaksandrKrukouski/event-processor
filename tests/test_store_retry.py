@@ -64,42 +64,42 @@ def down():
 
 def test_connect_is_retried_with_exponential_backoff(db):
     db.connects = [down(), down(), down()]
-    assert make().save_ready(EVENT, SOURCE) is True
+    assert make().save_ready(EVENT, SOURCE, ['d']) is True
     assert db.connect_calls == 4
     assert db.delays == [0.5, 1.0, 2.0]
 
 
 def test_backoff_is_capped_at_max_delay(db):
     db.connects = [down()] * 6
-    make(max_attempts=8, base_delay=1, max_delay=5).save_ready(EVENT, SOURCE)
+    make(max_attempts=8, base_delay=1, max_delay=5).save_ready(EVENT, SOURCE, ['d'])
     assert db.delays == [1, 2, 4, 5, 5, 5]
 
 
 def test_dropped_connection_is_replaced_and_the_write_retried(db):
     store = make()
     db.executes[:] = [psycopg.OperationalError("server closed the connection"), 1]
-    assert store.save_ready(EVENT, SOURCE) is True
+    assert store.save_ready(EVENT, SOURCE, ['d']) is True
     assert db.connect_calls == 2  # first connection plus one reconnect
 
 
 def test_retry_after_commit_is_reported_as_duplicate(db):
     store = make()
     db.executes[:] = [psycopg.OperationalError("lost the reply"), 0]  # row is already there
-    assert store.save_ready(EVENT, SOURCE) is False
+    assert store.save_ready(EVENT, SOURCE, ['d']) is False
 
 
 def test_gives_up_after_max_attempts(db):
     store = make(max_attempts=3)
     db.executes[:] = [down(), down(), down()]
     with pytest.raises(StoreUnavailable):
-        store.save_ready(EVENT, SOURCE)
+        store.save_ready(EVENT, SOURCE, ['d'])
 
 
 def test_permanent_errors_are_not_retried(db):
     store = make()
     db.executes[:] = [psycopg.errors.DataError("bad value")]
     with pytest.raises(psycopg.errors.DataError):
-        store.save_ready(EVENT, SOURCE)
+        store.save_ready(EVENT, SOURCE, ['d'])
     assert db.delays == []
     assert db.connect_calls == 1
 

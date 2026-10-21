@@ -47,15 +47,16 @@ def store(db):
 def rows(db, **where):
     cur = db.execute(
         "SELECT event_id, status, tenant_id, payload, raw_message, validation_errors, "
-        "source_partition, source_offset, occurred_at FROM events WHERE source_topic = %s ORDER BY id",
+        "source_partition, source_offset, occurred_at, routing_targets FROM events WHERE source_topic = %s ORDER BY id",
         (TOPIC,),
     )
     return cur.fetchall()
 
 
 def test_ready_event_is_persisted(store, db):
-    assert store.save_ready(EVENT, Source(TOPIC, 2, 10)) is True
-    [(event_id, status, tenant, payload, raw, errors, partition, offset, occurred_at)] = rows(db)
+    assert store.save_ready(EVENT, Source(TOPIC, 2, 10), ["destination-A"]) is True
+    [(event_id, status, tenant, payload, raw, errors, partition, offset, occurred_at, targets)] = rows(db)
+    assert targets == ["destination-A"]
     assert (event_id, status, tenant) == ("store_test_001", "READY", "tenant-001")
     assert payload == EVENT["payload"]
     assert raw is None and errors is None
@@ -64,8 +65,8 @@ def test_ready_event_is_persisted(store, db):
 
 
 def test_duplicate_event_id_is_ignored(store, db):
-    assert store.save_ready(EVENT, Source(TOPIC, 0, 1)) is True
-    assert store.save_ready(EVENT, Source(TOPIC, 0, 2)) is False  # redelivery / producer retry
+    assert store.save_ready(EVENT, Source(TOPIC, 0, 1), ["destination-A"]) is True
+    assert store.save_ready(EVENT, Source(TOPIC, 0, 2), ["destination-A"]) is False  # redelivery / producer retry
     assert len(rows(db)) == 1
     assert rows(db)[0][7] == 1  # the first write wins
 
@@ -96,6 +97,6 @@ def test_wrongly_typed_envelope_values_do_not_break_the_insert(store, db):
 def test_failed_write_raises_and_stores_nothing(store, db):
     broken = dict(EVENT, occurred_at="not a timestamp")
     with pytest.raises(psycopg.Error):
-        store.save_ready(broken, Source(TOPIC, 0, 6))
+        store.save_ready(broken, Source(TOPIC, 0, 6), ["destination-A"])
     assert rows(db) == []
-    assert store.save_ready(EVENT, Source(TOPIC, 0, 7)) is True  # connection still usable
+    assert store.save_ready(EVENT, Source(TOPIC, 0, 7), ["destination-A"]) is True  # connection still usable

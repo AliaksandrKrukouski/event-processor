@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS events (
     -- processing result
     status            TEXT        NOT NULL CHECK (status IN ('READY', 'INVALID', 'DELIVERED')),
     validation_errors JSONB,          -- list of errors when status = 'INVALID'
-    routing_targets   JSONB,          -- routing decision, e.g. ["webhook:client-a"]
+    routing_targets   JSONB,          -- destinations chosen for the tenant, e.g. ["destination-A"]
 
     -- timestamps
     received_at       TIMESTAMPTZ NOT NULL DEFAULT now(),

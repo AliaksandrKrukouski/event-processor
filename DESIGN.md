@@ -191,14 +191,15 @@ Additional indexes should follow actual query patterns, because every index adds
 
 ### Tenant routing
 
-`tenant_id` identifies the event owner and can determine a delivery destination. For the first version, a small local configuration mapping is sufficient, for example:
+`tenant_id` identifies the event owner and determines the delivery target. Routing is a plain dictionary in `app/processor.py`:
 
-```text
-tenant-001 -> destination-A
-tenant-002 -> destination-B
+```python
+TENANT_ROUTES = {"tenant-001": "destination-A", "tenant-002": "destination-B", "tenant-003": "destination-C"}
 ```
 
-The processor records the decision in `routing_targets` but does not perform final delivery. A nonempty tenant identifier is not proof of tenant authorization; production systems would require a trusted tenant registry and access controls. The behavior for unknown tenants should be explicit (for example, persist `INVALID` with a routing error).
+For a valid event the processor stores the target as a one-element JSON array in `routing_targets` (for example `["destination-A"]`). An event for a tenant that is not in the table is not deliverable: it is stored as `INVALID` with the error `routing: no route for tenant_id '<id>'`.
+
+The processor records the decision in `routing_targets` but does not perform final delivery. A nonempty tenant identifier is not proof of tenant authorization; production systems would require a trusted tenant registry and access controls.
 
 ### Local deployment
 

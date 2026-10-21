@@ -27,11 +27,11 @@ TRANSIENT_ERRORS = (psycopg.OperationalError, psycopg.InterfaceError)
 INSERT_SQL = """
 INSERT INTO events (
     event_id, tenant_id, event_type, schema_version, occurred_at,
-    payload, raw_message, status, validation_errors,
+    payload, raw_message, status, validation_errors, routing_targets,
     source_topic, source_partition, source_offset
 ) VALUES (
     %(event_id)s, %(tenant_id)s, %(event_type)s, %(schema_version)s, %(occurred_at)s,
-    %(payload)s, %(raw_message)s, %(status)s, %(validation_errors)s,
+    %(payload)s, %(raw_message)s, %(status)s, %(validation_errors)s, %(routing_targets)s,
     %(source_topic)s, %(source_partition)s, %(source_offset)s
 )
 ON CONFLICT (event_id) DO NOTHING
@@ -76,8 +76,8 @@ class EventStore:
         self._max_delay = max_delay
         self._conn: Optional[psycopg.Connection] = None  # opened on first use, reopened after errors
 
-    def save_ready(self, event: dict, source: Source) -> bool:
-        """Store a valid event. Returns False if an event with this event_id already exists."""
+    def save_ready(self, event: dict, source: Source, routing_targets: List[str]) -> bool:
+        """Store a valid, routed event. Returns False if an event with this event_id already exists."""
         return self._insert(
             status="READY",
             event_id=event["event_id"],
@@ -86,6 +86,7 @@ class EventStore:
             schema_version=event["schema_version"],
             occurred_at=event["occurred_at"],  # validated as RFC 3339; Postgres parses it
             payload=Jsonb(event["payload"]),
+            routing_targets=Jsonb(routing_targets),
             source=source,
         )
 
@@ -110,7 +111,7 @@ class EventStore:
     def _insert(self, source: Source, **columns: Any) -> bool:
         row = {
             "tenant_id": None, "event_type": None, "schema_version": None, "occurred_at": None,
-            "payload": None, "raw_message": None, "validation_errors": None,
+            "payload": None, "raw_message": None, "validation_errors": None, "routing_targets": None,
             "source_topic": source.topic, "source_partition": source.partition,
             "source_offset": source.offset,
             **columns,
